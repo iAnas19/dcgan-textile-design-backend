@@ -4,7 +4,8 @@ import numpy as np
 import torch
 import tempfile
 import uuid
-from fastapi import FastAPI, UploadFile, File
+import base64
+from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import FileResponse
 from app.models.dcgan import Generator  
 from torchvision.utils import save_image
@@ -51,42 +52,39 @@ async def generate_image():
         return FileResponse(temp_img.name, media_type="image/png")
 
 @app.post("/enhance")
-async def enhance_image(file: UploadFile = File(...)):
-    # Save the uploaded image to a temporary file
-    with tempfile.NamedTemporaryFile(delete=False) as temp_img:
-        contents = await file.read()
-        temp_img.write(contents)
+async def enhance_image(base64_image: str = Form(...)):
+    try:
+        # Decode the base64 image string
+        image_data = base64.b64decode(base64_image)
+        image_np = np.frombuffer(image_data, dtype=np.uint8)
+        img = cv2.imdecode(image_np, cv2.IMREAD_COLOR)
 
-    # Load the saved image using OpenCV
-    img = cv2.imread(temp_img.name, cv2.IMREAD_COLOR)
-    img = img * 1.0 / 255
-    img = torch.from_numpy(np.transpose(img[:, :, [2, 1, 0]], (2, 0, 1))).float()
-    img_LR = img.unsqueeze(0)
-    img_LR = img_LR.to(device)
+        img = img * 1.0 / 255
+        img = torch.from_numpy(np.transpose(img[:, :, [2, 1, 0]], (2, 0, 1))).float()
+        img_LR = img.unsqueeze(0)
+        img_LR = img_LR.to(device)
 
-    # Enhance the image using the ESRGAN model
-    with torch.no_grad():
-        output = model(img_LR).data.squeeze().float().cpu().clamp_(0, 1).numpy()
+        # Enhance the image using the ESRGAN model
+        with torch.no_grad():
+            output = model(img_LR).data.squeeze().float().cpu().clamp_(0, 1).numpy()
 
-    output = np.transpose(output[[2, 1, 0], :, :], (1, 2, 0))
-    output = (output * 255.0).round()
+        output = np.transpose(output[[2, 1, 0], :, :], (1, 2, 0))
+        output = (output * 255.0).round()
 
-    # Create a unique filename for the enhanced image
-    filename = f"{uuid.uuid4().hex}_enhanced.png"
+        # Create a unique filename for the enhanced image
+        filename = f"{uuid.uuid4().hex}_enhanced.png"
 
-    # Save the enhanced image to a temporary file
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False, prefix=filename) as temp_enhanced_img:
-        cv2.imwrite(temp_enhanced_img.name, output)
+        # Save the enhanced image to a temporary file
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False, prefix=filename) as temp_enhanced_img:
+            cv2.imwrite(temp_enhanced_img.name, output)
 
-    # Close the temporary files
-    temp_img.close()
-    temp_enhanced_img.close()
+        # Return the enhanced image using FileResponse
+        enhanced_response = FileResponse(
+            temp_enhanced_img.name,
+            media_type="image/png",
+            headers={"Content-Disposition": f"inline; filename={filename}"}
+        )
 
-    # Return the enhanced image using FileResponse
-    enhanced_response = FileResponse(
-        temp_enhanced_img.name,
-        media_type="image/png",
-        headers={"Content-Disposition": f"inline; filename={filename}"}
-    )
-
-    return enhanced_response
+        return enhanced_response
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
